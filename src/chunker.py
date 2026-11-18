@@ -1,7 +1,9 @@
+
 import ast
 from pathlib import Path
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 
 class CodeChunker:
 
@@ -9,260 +11,291 @@ class CodeChunker:
 
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1200,
-            chunk_overlap=200
+            chunk_overlap=200,
+            separators=[
+                "\n\n",
+                "\n",
+                " ",
+                ""
+            ]
         )
 
+    def detect_language(self, file_path: str):
 
-def detect_language(self, file_path: str):
+        extension = Path(file_path).suffix.lower()
 
-    extension = Path(file_path).suffix.lower()
+        mapping = {
+            ".py": "python",
+            ".java": "java",
+            ".md": "markdown",
+            ".txt": "text",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".cpp": "cpp",
+            ".c": "c",
+            ".go": "go",
+            ".rs": "rust"
+        }
 
-    mapping = {
+        return mapping.get(extension, "unknown")
 
-        ".py": "python",
+    def chunk_repository(self, repository_data):
 
-        ".java": "java",
+        chunks = []
 
-        ".md": "markdown",
+        for file_path, content in repository_data.items():
 
-        ".txt": "text",
+            if not content or not content.strip():
+                continue
 
-        ".js": "javascript",
+            language = self.detect_language(file_path)
 
-        ".ts": "typescript"
+            if language == "python":
 
-    }
-
-    return mapping.get(extension, "unknown")
-
-def chunk_repository(self, repository_data):
-
-    chunks = []
-
-    for file_path, content in repository_data.items():
-
-        language = self.detect_language(file_path)
-
-        if language == "python":
-
-            chunks.extend(
-                self.chunk_python(
+                file_chunks = self.chunk_python(
                     file_path,
                     content
                 )
-            )
 
-        else:
+            else:
 
-            chunks.extend(
-                self.chunk_text(
+                file_chunks = self.chunk_text(
                     file_path,
                     content,
                     language
                 )
+
+            chunks.extend(file_chunks)
+
+        return chunks
+
+    def chunk_python(self, file_path, content):
+
+        chunks = []
+
+        try:
+            tree = ast.parse(content)
+
+        except SyntaxError:
+            return self.chunk_text(
+                file_path,
+                content,
+                "python"
             )
 
-    return chunks
+        # Extract module-level classes and functions.
+        for node in tree.body:
 
+            if isinstance(node, ast.ClassDef):
 
-def chunk_python(
-        self,
-        file_path,
-        content
-):
-
-    chunks = []
-
-    try:
-      tree = ast.parse(content)
-
-    except SyntaxError:
-       return []
-
-    for node in tree.body:
-
-        if isinstance(node, ast.ClassDef):
-
-            chunks.extend(
-
-                self.extract_class(
+                class_chunks = self.extract_class(
                     node,
                     content,
                     file_path
                 )
 
-            )
+                chunks.extend(class_chunks)
 
-        elif isinstance(node, ast.FunctionDef):
+            elif isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
 
-            chunks.extend(
-
-                self.create_metadata(
-
-                    file_path=file_path,
-
-                    language="python",
-
-                    chunk_type="function",
-
-                    class_name=None,
-
-                    function_name=node.name,
-
-                    start_line=node.lineno,
-
-                    end_line=node.end_lineno,
-
-                    content=ast.get_source_segment(
-                        content,
-                        node
+                chunks.extend(
+                    self.create_metadata(
+                        file_path=file_path,
+                        language="python",
+                        chunk_type="function",
+                        class_name=None,
+                        function_name=node.name,
+                        start_line=self.get_start_line(node),
+                        end_line=node.end_lineno,
+                        content=ast.get_source_segment(
+                            content,
+                            node
+                        )
                     )
-
                 )
 
+        # Preserve files containing imports, constants,
+        # or other statements that were not extracted.
+        if not chunks:
+
+            return self.chunk_text(
+                file_path,
+                content,
+                "python"
             )
 
-    return chunks
+        return chunks
 
-
-def extract_class(
+    def extract_class(
         self,
         class_node,
         content,
         file_path
-):
+    ):
 
-    chunks = []
+        chunks = []
 
-    for node in class_node.body:
+        for node in class_node.body:
 
-        if isinstance(node, ast.FunctionDef):
+            if isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
 
-            chunks.extend(
-
-                self.create_metadata(
-
-                    file_path=file_path,
-
-                    language="python",
-
-                    chunk_type="method",
-
-                    class_name=class_node.name,
-
-                    function_name=node.name,
-
-                    start_line=node.lineno,
-
-                    end_line=node.end_lineno,
-
-                    content=ast.get_source_segment(
-                        content,
-                        node
+                chunks.extend(
+                    self.create_metadata(
+                        file_path=file_path,
+                        language="python",
+                        chunk_type="method",
+                        class_name=class_node.name,
+                        function_name=node.name,
+                        start_line=self.get_start_line(node),
+                        end_line=node.end_lineno,
+                        content=ast.get_source_segment(
+                            content,
+                            node
+                        )
                     )
-
                 )
 
+        # Preserve classes without methods.
+        if not chunks:
+
+            class_content = ast.get_source_segment(
+                content,
+                class_node
             )
 
-    return chunks
+            chunks.extend(
+                self.create_metadata(
+                    file_path=file_path,
+                    language="python",
+                    chunk_type="class",
+                    class_name=class_node.name,
+                    function_name=None,
+                    start_line=self.get_start_line(class_node),
+                    end_line=class_node.end_lineno,
+                    content=class_content
+                )
+            )
 
+        return chunks
 
-def create_metadata(
+    def get_start_line(self, node):
 
+        # Include decorators in the extracted source range.
+        if getattr(node, "decorator_list", None):
+            return min(
+                decorator.lineno
+                for decorator in node.decorator_list
+            )
+
+        return node.lineno
+
+    def create_metadata(
         self,
-
         file_path,
-
         language,
-
         chunk_type,
-
         class_name,
-
         function_name,
-
         start_line,
-
         end_line,
-
         content
+    ):
 
-):
+        if not content:
+            return []
 
-    if content is None:
+        if len(content) > 1200:
 
-        content = ""
+            split_chunks = self.text_splitter.split_text(
+                content
+            )
 
-    if len(content) > 1200:
+        else:
 
-        split_chunks = self.text_splitter.split_text(content)
+            split_chunks = [content]
 
-    else:
+        final_chunks = []
 
-        split_chunks = [content]
+        for index, chunk in enumerate(split_chunks):
 
-    final_chunks = []
+            final_chunks.append(
+                {
+                    "file_path": file_path,
+                    "language": language,
+                    "chunk_type": chunk_type,
+                    "class_name": class_name,
+                    "function_name": function_name,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "chunk_id": index,
+                    "content": chunk
+                }
+            )
 
-    for index, chunk in enumerate(split_chunks):
+        return final_chunks
 
-        final_chunks.append({
-
-            "file_path": file_path,
-
-            "language": language,
-
-            "chunk_type": chunk_type,
-
-            "class_name": class_name,
-
-            "function_name": function_name,
-
-            "start_line": start_line,
-
-            "end_line": end_line,
-
-            "chunk_id": index,
-
-            "content": chunk
-
-        })
-
-    return final_chunks
-
-def chunk_text(
+    def chunk_text(
         self,
         file_path,
         content,
         language
-):
+    ):
 
-    chunks = []
+        if not content or not content.strip():
+            return []
 
-    split_text = self.text_splitter.split_text(content)
+        split_text = self.text_splitter.split_text(
+            content
+        )
 
-    for index, chunk in enumerate(split_text):
+        final_chunks = []
 
-        chunks.append({
+        current_position = 0
 
-            "file_path": file_path,
+        for index, chunk in enumerate(split_text):
 
-            "language": language,
+            # Estimate line ranges for text-based chunks.
+            start_position = content.find(
+                chunk,
+                current_position
+            )
 
-            "chunk_type": "text",
+            if start_position == -1:
+                start_position = current_position
 
-            "class_name": None,
+            end_position = start_position + len(chunk)
 
-            "function_name": None,
+            start_line = (
+                content.count("\n", 0, start_position) + 1
+            )
 
-            "start_line": None,
+            end_line = (
+                content.count("\n", 0, end_position) + 1
+            )
 
-            "end_line": None,
+            final_chunks.append(
+                {
+                    "file_path": file_path,
+                    "language": language,
+                    "chunk_type": "text",
+                    "class_name": None,
+                    "function_name": None,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "chunk_id": index,
+                    "content": chunk
+                }
+            )
 
-            "chunk_id": index,
+            current_position = max(
+                current_position,
+                end_position - 200
+            )
 
-            "content": chunk
-
-        })
-
-    return chunks
+        return final_chunks

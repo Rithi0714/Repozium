@@ -1,21 +1,25 @@
+
 import os
 import shutil
+import stat
+import hashlib
 from pathlib import Path
+
 from git import Repo
 
 
 class RepositoryLoader:
     """
-    Handles cloning a GitHub repository and loading
-    supported source files into memory.
+    Handles cloning GitHub repositories and loading
+    supported source files safely.
     """
 
     def __init__(self):
 
-        # Temporary location where repositories are cloned
         self.workspace = Path("workspace")
 
-        # File extensions we want to read
+        self.max_file_size = 1 * 1024 * 1024  # 1 MB
+
         self.supported_extensions = {
             ".py",
             ".java",
@@ -29,38 +33,66 @@ class RepositoryLoader:
             ".txt",
         }
 
-        # Directories we don't want to scan
         self.ignored_directories = {
             ".git",
             "node_modules",
             "venv",
+            ".venv",
             "__pycache__",
             "dist",
             "build",
             ".idea",
             ".vscode",
+            ".next",
+            "coverage",
+            "target",
+            "vendor",
+            ".gradle",
         }
 
-        # Create workspace if it doesn't exist
-        self.workspace.mkdir(exist_ok=True)
+        self.ignored_files = {
+            ".env",
+            ".env.local",
+            ".env.production",
+            "id_rsa",
+            "id_ed25519",
+            "credentials",
+            "secrets.txt",
+        }
+
+        self.workspace.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
     def clone_repository(self, repo_url: str) -> Path:
         """
-        Clone the repository into the workspace folder.
-        Returns the path of the cloned repository.
+        Clone a repository into a unique workspace directory.
         """
 
         repo_name = repo_url.rstrip("/").split("/")[-1]
 
-        repo_path = self.workspace / repo_name
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
 
-        # Remove existing copy
+        repo_hash = hashlib.sha256(
+            repo_url.encode("utf-8")
+        ).hexdigest()[:10]
+
+        repo_path = self.workspace / f"{repo_name}_{repo_hash}"
+
         if repo_path.exists():
-            shutil.rmtree(repo_path)
+
+            print("Removing existing repository copy...")
+
+            self._remove_directory(repo_path)
 
         print(f"Cloning {repo_name}...")
 
-        Repo.clone_from(repo_url, repo_path)
+        Repo.clone_from(
+            repo_url,
+            repo_path
+        )
 
         print("Repository cloned successfully.\n")
 
@@ -68,49 +100,96 @@ class RepositoryLoader:
 
     def load_files(self, repo_path: Path) -> dict:
         """
-        Reads all supported files and returns a dictionary.
+        Read supported source files into memory.
         """
 
         repository_data = {}
 
         for root, dirs, files in os.walk(repo_path):
 
-            # Skip unwanted directories
             dirs[:] = [
-                d for d in dirs
-                if d not in self.ignored_directories
+                directory
+                for directory in dirs
+                if directory not in self.ignored_directories
             ]
 
             for file in files:
 
                 file_path = Path(root) / file
 
-                if file_path.suffix not in self.supported_extensions:
+                if file.lower() in self.ignored_files:
+                    continue
+
+                if file_path.suffix.lower() not in self.supported_extensions:
                     continue
 
                 try:
+
+                    # Avoid loading extremely large files.
+                    if file_path.stat().st_size > self.max_file_size:
+                        print(f"Skipping large file: {file_path}")
+                        continue
+
+                    relative_path = file_path.relative_to(
+                        repo_path
+                    )
 
                     with open(
                         file_path,
                         "r",
                         encoding="utf-8",
-                        errors="ignore",
+                        errors="ignore"
                     ) as f:
 
+                        content = f.read()
+
+                    if content.strip():
+
                         repository_data[
-                            str(file_path.relative_to(repo_path))
-                        ] = f.read()
+                            str(relative_path)
+                        ] = content
 
-                except Exception as e:
+                except Exception as error:
 
-                    print(f"Could not read {file_path}: {e}")
+                    print(
+                        f"Could not read {file_path}: {error}"
+                    )
 
         return repository_data
 
     def cleanup(self, repo_path: Path):
         """
-        Delete cloned repository after processing.
+        Remove temporary repository after ingestion.
         """
 
         if repo_path.exists():
-            shutil.rmtree(repo_path)
+
+            print("Removing temporary repository...")
+
+            self._remove_directory(repo_path)
+
+            print("Temporary repository removed.")
+            print("Cleanup completed.")
+
+    def _remove_directory(self, directory: Path):
+        """
+        Safely remove directories, including read-only files.
+        """
+
+        def handle_remove_error(
+            function,
+            path,
+            exc_info
+        ):
+
+            os.chmod(
+                path,
+                stat.S_IWRITE
+            )
+
+            function(path)
+
+        shutil.rmtree(
+            directory,
+            onerror=handle_remove_error
+        )
